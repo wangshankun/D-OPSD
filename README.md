@@ -5,7 +5,7 @@
 [![Project Page](https://img.shields.io/badge/Official%20Site-333399.svg?logo=homepage)](https://vvvvvjdy.github.io/d-opsd/)&#160;
   <a href="https://github.com/vvvvvjdy/D-OPSD"><img src="https://img.shields.io/badge/GitHub(DOPSD)-9E95B7?logo=github"></a> &nbsp;
     <a href="https://github.com/Tongyi-MAI/Z-Image"><img src="https://img.shields.io/badge/GitHub(ZImage)-9E95B7?logo=github"></a> &nbsp;
-<a href="https://arxiv.org/abs/1" target="_blank"><img src="https://img.shields.io/badge/Paper-b5212f.svg?logo=arxiv" height="21px"></a>
+<a href="https://arxiv.org/abs/2605.05204" target="_blank"><img src="https://img.shields.io/badge/Paper-b5212f.svg?logo=arxiv" height="21px"></a>
 
 </div>
 
@@ -18,7 +18,7 @@
 ### 🕒 Note
 Our training  code is currently undergoing internal check of the company. Once it passes, we will open source it. 
 
-Our work can also be reproduced based on our [paper](https://arxiv.org/abs/1).
+Our work can also be reproduced based on our [paper](https://arxiv.org/abs/2605.05204).
 
 
 
@@ -69,7 +69,7 @@ If you find D-OPSD useful, please kindly cite our paper:
 @article{jiang2026dopsd,
       title={D-OPSD: On-Policy Self-Distillation for Continuously Tuning Step-Distilled Diffusion Models},
       author={Jiang, Dengyang and Jin, Xin and Liu, Dongyang and Wang, Zanyi and Zheng, Mingzhe and Du, Ruoyi and Yang, Xiangpeng and Wu, Qilong and Li, Zhen and Gao, Peng and Yang, Harry and Hoi, Steven},
-      journal={arXiv preprint arXiv:},
+      journal={arXiv preprint arXiv:2605.05204},
       year={2026}
 }
 ```
