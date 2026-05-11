@@ -15,13 +15,6 @@
 
 
 
-### 🕒 Note
-Our training  code is currently undergoing internal check of the company. Once it passes, we will open source it. 
-
-Our work can also be reproduced based on our [paper](https://arxiv.org/abs/2605.05204).
-
-
-
 
 ### 🎀 Highlight
 
@@ -61,6 +54,27 @@ original few-step inference capability and previous knowledge.
 </p>
 
 ---
+
+### 🪩 Environment Setup
+```bash
+git clone https://github.com/vvvvvjdy/D-OPSD.git
+conda create -n dopsd python=3.12 -y
+conda activate dopsd
+pip install -r requirements.txt
+```
+****
+
+
+
+### 🍬 Training 
+
+#### D-OPSD Z-Image-Turbo LoRA training with self-distilled vlm context:
+
+Refer to [ (z-image-turbo_self-distill-vlm)](z-image-turbo_self-distill-vlm/README.md) for training guidance.
+
+#### D-OPSD FLUX2-klein LoRA training with self-distilled eidting branch context for scenario of high id accuracy requirement:
+
+Will be released soon.
 
 
 ### 🌺 Citation
