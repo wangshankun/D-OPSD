@@ -110,7 +110,6 @@ def save_student_teacher_trajectory(pipeline, student_x0_traj, teacher_x0_traj, 
         return img
 
     for i, (sx0, tx0) in enumerate(zip(student_x0_traj, teacher_x0_traj)):
-        # 先不 gather，避免多卡可视化干扰
         s = decode_latents_to_images(sx0[:4], pipeline).float()
         t = decode_latents_to_images(tx0[:4], pipeline).float()
 
@@ -122,7 +121,6 @@ def save_student_teacher_trajectory(pipeline, student_x0_traj, teacher_x0_traj, 
             s_np = to_uint8(s)
             t_np = to_uint8(t)
 
-            # 额外保存第一张单图，方便判断是不是 grid 问题
             single_img_dir = f"{t_dir}/one_img"
             os.makedirs(single_img_dir, exist_ok=True)
             Image.fromarray(s_np[0]).save(os.path.join(single_img_dir, f"step_{global_step}_student_single.png"))
