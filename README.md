@@ -32,7 +32,7 @@ Refer to [ (z-image-turbo_self-distill-vlm)](z-image-turbo_self-distill-vlm/READ
 
 #### D-OPSD FLUX2-klein LoRA training with self-distilled eidting branch context for scenario of high id accuracy requirement:
 
-Will be released soon.
+Refer to [ (flux2-klein_self-distill-edit)](flux2-klein_self-distill-edit/README.md) for training guidance and more discussion.
 
 ****
 
