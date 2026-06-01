@@ -17,7 +17,7 @@ hf-xet==1.2.0
 hjson==3.1.0
 huggingface_hub==1.2.3
 ninja==1.13.0
-safetensors==0.7.0
+safetensors>=0.7.0
 scipy==1.16.3
 tokenizers==0.22.1
 triton==3.3.0

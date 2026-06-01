@@ -15,6 +15,7 @@ import tqdm
 import logging
 from pathlib import Path
 import json
+from typing import Dict, Optional
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 import math
@@ -59,6 +60,122 @@ def unwrap_model(model, accelerator):
     model = accelerator.unwrap_model(model)
     model = model._orig_mod if is_compiled_module(model) else model
     return model
+
+
+def _is_adapter_lora_param(name, adapter_name, lora_part=None):
+    if adapter_name not in name:
+        return False
+    if lora_part is None:
+        return "lora_A" in name or "lora_B" in name
+    return lora_part in name
+
+
+def configure_lori_trainable(model, train_adapter="student", ema_adapter="teacher"):
+    for name, param in model.named_parameters():
+        if _is_adapter_lora_param(name, train_adapter, "lora_A"):
+            param.requires_grad = False
+        elif _is_adapter_lora_param(name, train_adapter, "lora_B"):
+            param.requires_grad = True
+        elif _is_adapter_lora_param(name, ema_adapter):
+            param.requires_grad = False
+        elif "lora_" in name:
+            param.requires_grad = False
+
+
+def _normalize_lora_mask_name(name):
+    return (
+        name
+        .replace("_checkpoint_wrapped_module.", "")
+        .replace("_fsdp_wrapped_module.", "")
+        .replace("module.", "")
+    )
+
+
+def _lookup_lori_mask(mask_dict: Dict[str, torch.Tensor], name: str) -> Optional[torch.Tensor]:
+    if name in mask_dict:
+        return mask_dict[name]
+    normalized_name = _normalize_lora_mask_name(name)
+    if normalized_name in mask_dict:
+        return mask_dict[normalized_name]
+    for mask_name, mask in mask_dict.items():
+        if normalized_name.endswith(_normalize_lora_mask_name(mask_name)):
+            return mask
+    return None
+
+
+@torch.no_grad()
+def create_lori_b_masks(model, sparsity, adapter_name="student"):
+    lora_b_params = [
+        (name, param)
+        for name, param in model.named_parameters()
+        if _is_adapter_lora_param(name, adapter_name, "lora_B")
+    ]
+    if not lora_b_params:
+        raise ValueError(f"No LoRA-B parameters found for adapter {adapter_name}.")
+
+    all_values = torch.cat([param.detach().abs().flatten().float().cpu() for _, param in lora_b_params])
+    total_num = all_values.numel()
+    keep_num = int((1.0 - sparsity) * total_num)
+
+    if keep_num <= 0:
+        threshold = None
+    elif keep_num >= total_num:
+        threshold = all_values.min()
+    else:
+        threshold = torch.topk(all_values, keep_num).values[-1]
+
+    masks = {}
+    retained_num = 0
+    for name, param in lora_b_params:
+        if threshold is None:
+            mask = torch.zeros_like(param, dtype=torch.bool, device="cpu")
+        else:
+            mask = (param.detach().abs().float().cpu() >= threshold)
+        masks[_normalize_lora_mask_name(name)] = mask
+        retained_num += mask.sum().item()
+
+    actual_sparsity = 1.0 - (retained_num / total_num)
+    return masks, actual_sparsity
+
+
+@torch.no_grad()
+def zero_lori_b_weights(model, adapter_name="student"):
+    for name, param in model.named_parameters():
+        if _is_adapter_lora_param(name, adapter_name, "lora_B"):
+            param.zero_()
+
+
+@torch.no_grad()
+def enforce_lori_b_masks(model, mask_dict, adapter_name="student"):
+    if not mask_dict:
+        return
+    for name, param in model.named_parameters():
+        if not _is_adapter_lora_param(name, adapter_name, "lora_B"):
+            continue
+        mask = _lookup_lori_mask(mask_dict, name)
+        if mask is None:
+            raise KeyError(f"Missing LoRI mask for parameter {name}.")
+        param.mul_(mask.to(device=param.device, dtype=param.dtype))
+
+
+def apply_lori_gradient_masks(model, mask_dict, adapter_name="student"):
+    if not mask_dict:
+        return
+    for name, param in model.named_parameters():
+        if param.grad is None or not _is_adapter_lora_param(name, adapter_name, "lora_B"):
+            continue
+        mask = _lookup_lori_mask(mask_dict, name)
+        if mask is None:
+            raise KeyError(f"Missing LoRI mask for gradient {name}.")
+        param.grad.mul_(mask.to(device=param.grad.device, dtype=param.grad.dtype))
+
+
+def clear_optimizer_state(optimizer):
+    if hasattr(optimizer, "state") and hasattr(optimizer.state, "clear"):
+        optimizer.state.clear()
+    inner_optimizer = getattr(optimizer, "optimizer", None)
+    if inner_optimizer is not None and hasattr(inner_optimizer, "state") and hasattr(inner_optimizer.state, "clear"):
+        inner_optimizer.state.clear()
 
 def compute_empirical_mu(image_seq_len, num_steps):
     a1, b1 = 8.73809524e-05, 1.89833333
@@ -395,6 +512,10 @@ def main(args):
             old_adapter_name="teacher",
             old_init_from_current=True,
         )
+        if args.use_lori:
+            if not 0.0 <= args.lori_sparsity <= 1.0:
+                raise ValueError("--lori-sparsity must be in [0, 1].")
+            configure_lori_trainable(pipeline.transformer, train_adapter="student", ema_adapter="teacher")
 
     # we use ema in full-finetune
     else:
@@ -412,6 +533,12 @@ def main(args):
     pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
 
     gen_model = pipeline.transformer
+    lori_masks = None
+    if args.use_lora > 1 and args.use_lori and args.lori_mask_path is not None:
+        lori_masks = torch.load(args.lori_mask_path, map_location="cpu")
+        if accelerator.is_main_process:
+            logger.info(f"Loaded LoRI mask from {args.lori_mask_path}")
+
     gen_model_trainable_parameters = list(filter(lambda p: p.requires_grad, gen_model.parameters()))
 
     # enable gradient checkpointing
@@ -544,11 +671,24 @@ def main(args):
     )
 
     global_step = 0
+    lori_calibration_step = 0
+    use_lori_calibration = (
+        args.use_lora > 1
+        and args.use_lori
+        and lori_masks is None
+        and args.lori_sparsity > 0.0
+        and args.lori_calibration_steps > 0
+    )
     epoch_start = -1
     # resume (we now leave it blank, users can add their own checkpoints)
 
     if accelerator.is_main_process:
         logger.info(f"Starting training experiment: {args.exp_name}")
+        if args.use_lora > 1 and args.use_lori:
+            logger.info(
+                "LoRI enabled: frozen student LoRA-A, trainable student LoRA-B, "
+                f"sparsity={args.lori_sparsity}, calibration_steps={args.lori_calibration_steps}"
+            )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -754,36 +894,86 @@ def main(args):
                 total_loss = total_loss / len(loss_dopsd_whole)
                 accelerator.backward(total_loss)
 
+                if args.use_lora > 1 and args.use_lori and lori_masks is not None:
+                    apply_lori_gradient_masks(gen_model, lori_masks, adapter_name="student")
+
                 grad_norm = None
                 if accelerator.sync_gradients:
                     grad_norm = accelerator.clip_grad_norm_(gen_model.parameters(), args.max_grad_norm)
 
                 optimizer_gen.step()
+                if args.use_lora > 1 and args.use_lori and lori_masks is not None:
+                    enforce_lori_b_masks(gen_model, lori_masks, adapter_name="student")
                 optimizer_gen.zero_grad(set_to_none=True)
 
                 if accelerator.sync_gradients:
-                    global_step += 1
-                    progress_bar.update(1)
+                    if use_lori_calibration:
+                        lori_calibration_step += 1
+                        global_step += 1
+                        progress_bar.update(1)
+                        logs = {
+                            "loss_dopsd": accelerator.gather(torch.stack(loss_dopsd_whole).detach()).mean().item(),
+                            "loss_total": accelerator.gather(total_loss.detach()).mean().item(),
+                            "glo_s": global_step,
+                            "lori_calib_s": lori_calibration_step,
+                            "epoch": epoch,
+                            "grad_n": float(grad_norm) if grad_norm is not None else 0.0,
+                        }
+                        accelerator.log(logs, step=global_step)
+                        ema_update_lora_adapter(
+                            gen_model,
+                            src_adapter="student",
+                            dst_adapter="teacher",
+                            ema_decay=args.ema_decay,
+                        )
 
-                    logs = {
-                        "loss_dopsd": accelerator.gather(torch.stack(loss_dopsd_whole).detach()).mean().item(),
-                        "loss_total": accelerator.gather(total_loss.detach()).mean().item(),
-                        "glo_s": global_step,
-                        "epoch": epoch,
-                        "grad_n": float(grad_norm) if grad_norm is not None else 0.0,
-                    }
+                        if accelerator.is_main_process:
+                            with open(log_gen, "a") as f_log_gen:
+                                f_log_gen.write(f"{json.dumps(logs)}\n")
 
-                    accelerator.log(logs, step=global_step)
-                    ema_update_lora_adapter(
-                        gen_model,
-                        src_adapter="student",
-                        dst_adapter="teacher",
-                        ema_decay=args.ema_decay,
-                    )
+                        if lori_calibration_step >= args.lori_calibration_steps:
+                            lori_masks, actual_sparsity = create_lori_b_masks(
+                                gen_model,
+                                sparsity=args.lori_sparsity,
+                                adapter_name="student",
+                            )
+                            zero_lori_b_weights(gen_model, adapter_name="student")
+                            copy_lora_adapter_weights(gen_model, src_adapter="student", dst_adapter="teacher")
+                            enforce_lori_b_masks(gen_model, lori_masks, adapter_name="student")
+                            clear_optimizer_state(optimizer_gen)
+                            use_lori_calibration = False
 
-                    if accelerator.is_main_process:
-                        with open(log_gen, "a") as f_log_gen:
-                            f_log_gen.write(f"{json.dumps(logs)}\n")
+                            mask_path = os.path.join(checkpoint_dir, "lori_student_b_mask.pt")
+                            if accelerator.is_main_process:
+                                torch.save(lori_masks, mask_path)
+                                logger.info(
+                                    f"Finished LoRI calibration. Actual sparsity={actual_sparsity:.6f}. "
+                                    f"Saved mask to {mask_path}"
+                                )
+
+                    else:
+                        global_step += 1
+                        progress_bar.update(1)
+
+                        logs = {
+                            "loss_dopsd": accelerator.gather(torch.stack(loss_dopsd_whole).detach()).mean().item(),
+                            "loss_total": accelerator.gather(total_loss.detach()).mean().item(),
+                            "glo_s": global_step,
+                            "epoch": epoch,
+                            "grad_n": float(grad_norm) if grad_norm is not None else 0.0,
+                        }
+
+                        accelerator.log(logs, step=global_step)
+                        ema_update_lora_adapter(
+                            gen_model,
+                            src_adapter="student",
+                            dst_adapter="teacher",
+                            ema_decay=args.ema_decay,
+                        )
+
+                        if accelerator.is_main_process:
+                            with open(log_gen, "a") as f_log_gen:
+                                f_log_gen.write(f"{json.dumps(logs)}\n")
 
                     # save model
                     if global_step % args.checkpoint_steps == 0 or global_step == args.max_train_steps:

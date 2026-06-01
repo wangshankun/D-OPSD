@@ -1,6 +1,6 @@
 CONFIG_FILE="configs/default.yaml"
 MAIN_PORT=60212
-NUM_PROCS=4
+NUM_PROCS=1
 PYTHON_SCRIPT="train_dopsd.py"
 accelerate launch \
     --config_file      ${CONFIG_FILE} \
@@ -9,7 +9,7 @@ accelerate launch \
     ${PYTHON_SCRIPT} \
     --deepspeed-config  "configs/z2.json" \
     --output-dir     "exp_results/" \
-    --exp-name     "dopsd_editcontext_ema0.9999_onpolicy_4steptrain_4b_corgi_bsz4_lora_lr2e-5" \
+    --exp-name     "dopsd_editcontext_ema0.9999_onpolicy_4steptrain_9b_corgi_bsz1_lori_s0.9_calib100_lr2e-5" \
     --sample-steps      100 \
     --checkpoint-steps  500 \
     --epochs              3001 \
@@ -19,6 +19,9 @@ accelerate launch \
     --use-lora 2 \
     --lora-rank 64 \
     --lora-alpha 128 \
+    --use-lori \
+    --lori-sparsity 0.9 \
+    --lori-calibration-steps 100 \
     --data-path-train-jsonl "dataset/corgi/data.jsonl" \
     --data-path-test-jsonl "dataset/corgi/data.jsonl" \
     --seed   30 \
